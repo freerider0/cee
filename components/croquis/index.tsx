@@ -18,6 +18,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { WindowsPanel, Window, LineWithWindows } from "./WindowsPanel";
+import { WindRose } from "./WindRose";
 
 interface Point {
   x: number;
@@ -29,6 +30,7 @@ interface LineElement extends LineWithWindows {
   points: number[];
   selected: boolean;
   isHovered?: boolean;
+  exteriorSide: 'positive' | 'negative';
 }
 
 interface SelectionRect {
@@ -55,6 +57,9 @@ export function CroquisCanvas() {
   const [isDraggingHandler, setIsDraggingHandler] = useState(false);
   const [isDraggingWalls, setIsDraggingWalls] = useState(false);
   const [lastPointerPosition, setLastPointerPosition] = useState<Point | null>(null);
+  const [alignmentPoints, setAlignmentPoints] = useState<Point[]>([]);
+  const [isMiddleMousePanning, setIsMiddleMousePanning] = useState(false);
+  const [lastMousePosition, setLastMousePosition] = useState<Point | null>(null);
   
   const stageRef = useRef(null);
   const layerRef = useRef<Konva.Layer>(null);
@@ -62,15 +67,19 @@ export function CroquisCanvas() {
   // Add snap threshold constant
   const SNAP_THRESHOLD = 10;
 
+  // Add WindRose constants
+  const WIND_ROSE_MARGIN = 20;
+  const WIND_ROSE_SIZE = 200;
+
   // Helper function to find nearest point from other lines only
   function findNearestPoint(currentPoint: Point, currentLineId: string): Point | null {
     let nearest: Point | null = null;
     let minDistance = SNAP_THRESHOLD;
 
+    // Only check endpoints of existing lines
     lines.forEach(line => {
       if (line.id === currentLineId) return;
 
-      // Use exact coordinates for start and end points
       const startPoint = { 
         x: Math.round(line.points[0]), 
         y: Math.round(line.points[1]) 
@@ -148,6 +157,7 @@ export function CroquisCanvas() {
         id: Date.now().toString(),
         points: [startPos.x, startPos.y, startPos.x, startPos.y],
         selected: false,
+        exteriorSide: 'positive'
       };
       
       setLines([...lines, newLine]);
@@ -184,6 +194,23 @@ export function CroquisCanvas() {
 
   // Add new handler for general mouse movement
   function handleStageMouseMove(e: any) {
+    // Handle middle mouse panning
+    if (isMiddleMousePanning && lastMousePosition) {
+      const dx = e.evt.clientX - lastMousePosition.x;
+      const dy = e.evt.clientY - lastMousePosition.y;
+      
+      setPosition(prev => ({
+        x: prev.x + dx,
+        y: prev.y + dy
+      }));
+      
+      setLastMousePosition({
+        x: e.evt.clientX,
+        y: e.evt.clientY
+      });
+      return;
+    }
+
     if (mode === "draw") {
       const stage = e.target.getStage();
       const pointerPos = stage.getPointerPosition();
@@ -222,47 +249,42 @@ export function CroquisCanvas() {
         finalPos = getOrthogonalPoint(startPoint, pos);
       }
       
-      const nearestPoint = findNearestPoint(finalPos, currentLine.id);
-      
-      if (nearestPoint) {
-        const distance = Math.sqrt(
-          Math.pow(finalPos.x - nearestPoint.x, 2) + 
-          Math.pow(finalPos.y - nearestPoint.y, 2)
-        );
-        
-        if (distance <= SNAP_THRESHOLD * 2) {
-          setSnapPoint(nearestPoint);
-          if (distance <= SNAP_THRESHOLD) {
-            currentLine.points = [
-              currentLine.points[0],
-              currentLine.points[1],
-              nearestPoint.x,
-              nearestPoint.y,
-            ];
-          } else {
-            currentLine.points = [
-              currentLine.points[0],
-              currentLine.points[1],
-              Math.round(finalPos.x),
-              Math.round(finalPos.y),
-            ];
-          }
-        } else {
-          setSnapPoint(null);
-          currentLine.points = [
-            currentLine.points[0],
-            currentLine.points[1],
-            Math.round(finalPos.x),
-            Math.round(finalPos.y),
-          ];
+      // Find alignment points
+      const alignPoints = findAlignmentPoints(finalPos, currentLine.id);
+      setAlignmentPoints(alignPoints);
+
+      // Check for alignment and snap to it
+      let snappedPos = { ...finalPos };
+      alignPoints.forEach(point => {
+        // Check for vertical alignment (same X coordinate)
+        if (Math.abs(point.x - finalPos.x) < SNAP_THRESHOLD) {
+          snappedPos.x = point.x;
         }
+        // Check for horizontal alignment (same Y coordinate)
+        if (Math.abs(point.y - finalPos.y) < SNAP_THRESHOLD) {
+          snappedPos.y = point.y;
+        }
+      });
+
+      // Check for endpoint snapping
+      const nearestPoint = findNearestPoint(snappedPos, currentLine.id);
+      if (nearestPoint && 
+          Math.sqrt(Math.pow(snappedPos.x - nearestPoint.x, 2) + 
+                   Math.pow(snappedPos.y - nearestPoint.y, 2)) <= SNAP_THRESHOLD) {
+        setSnapPoint(nearestPoint);
+        currentLine.points = [
+          currentLine.points[0],
+          currentLine.points[1],
+          nearestPoint.x,
+          nearestPoint.y,
+        ];
       } else {
         setSnapPoint(null);
         currentLine.points = [
           currentLine.points[0],
           currentLine.points[1],
-          Math.round(finalPos.x),
-          Math.round(finalPos.y),
+          Math.round(snappedPos.x),
+          Math.round(snappedPos.y),
         ];
       }
       
@@ -291,8 +313,32 @@ export function CroquisCanvas() {
 
   function handleMouseUp(e: any) {
     if (mode === "draw") {
+      const stage = e.target.getStage();
+      const pointerPos = stage.getPointerPosition();
+      const pos = {
+        x: (pointerPos.x - position.x) / scale,
+        y: (pointerPos.y - position.y) / scale
+      };
+
+      if (isDrawing) {
+        const lastLine = [...lines];
+        const currentLine = lastLine[lastLine.length - 1];
+        const nearestPoint = findNearestPoint(pos, currentLine.id);
+
+        if (nearestPoint) {
+          currentLine.points = [
+            currentLine.points[0],
+            currentLine.points[1],
+            nearestPoint.x,
+            nearestPoint.y
+          ];
+          setLines(lastLine);
+        }
+      }
+
       setIsDrawing(false);
       setSnapPoint(null);
+      setAlignmentPoints([]);
     } else if (mode === "select" && selectionRect) {
       // Apply selection to lines
       const updatedLines = lines.map(line => ({
@@ -336,12 +382,14 @@ export function CroquisCanvas() {
       id: Date.now().toString(),
       points: [x1, y1, pos.x, pos.y],
       selected: false,
+      exteriorSide: 'positive'
     };
     
     const line2: LineElement = {
       id: (Date.now() + 1).toString(),
       points: [pos.x, pos.y, x2, y2],
       selected: false,
+      exteriorSide: 'positive'
     };
     
     setLines([...newLines, line1, line2]);
@@ -574,10 +622,24 @@ export function CroquisCanvas() {
   }
 
   function handleStageMouseDown(e: any) {
+    // Handle middle mouse button separately
+    if (e.evt.button === 1) {
+      e.evt.preventDefault(); // Prevent default middle mouse behavior
+      setIsMiddleMousePanning(true);
+      const stage = e.target.getStage();
+      stage.container().style.cursor = 'grabbing';
+      setLastMousePosition({
+        x: e.evt.clientX,
+        y: e.evt.clientY
+      });
+      return;
+    }
+
+    // Original mouse down logic
     if (mode === "moveWalls") {
       const hasSelectedWalls = lines.some(line => line.selected);
       if (!hasSelectedWalls) {
-        handleMouseDown(e); // Use existing selection logic
+        handleMouseDown(e);
       } else {
         setIsDraggingWalls(true);
         const stage = e.target.getStage();
@@ -593,6 +655,16 @@ export function CroquisCanvas() {
   }
 
   function handleStageMouseUp(e: any) {
+    // Handle middle mouse button
+    if (e.evt.button === 1) {
+      setIsMiddleMousePanning(false);
+      setLastMousePosition(null);
+      const stage = e.target.getStage();
+      stage.container().style.cursor = 'default';
+      return;
+    }
+
+    // Original mouse up logic
     if (mode === "moveWalls") {
       setIsDraggingWalls(false);
       setLastPointerPosition(null);
@@ -609,6 +681,89 @@ export function CroquisCanvas() {
     setSelectionRect(null);
     setScale(1);
     setPosition({ x: 0, y: 0 });
+  }
+
+  // Add this helper function to find points at same X or Y coordinates
+  function findAlignmentPoints(currentPoint: Point, currentLineId: string): Point[] {
+    const alignmentPoints: Point[] = [];
+    const threshold = 10; // Snap threshold in pixels
+
+    lines.forEach(line => {
+      if (line.id === currentLineId) return;
+
+      // Get start and end points
+      const [x1, y1, x2, y2] = line.points;
+      const points = [
+        { x: x1, y: y1 },
+        { x: x2, y: y2 }
+      ];
+
+      points.forEach(point => {
+        // Check for vertical alignment (same X coordinate)
+        if (Math.abs(point.x - currentPoint.x) < threshold) {
+          alignmentPoints.push({ x: point.x, y: point.y });
+        }
+        // Check for horizontal alignment (same Y coordinate)
+        if (Math.abs(point.y - currentPoint.y) < threshold) {
+          alignmentPoints.push({ x: point.x, y: point.y });
+        }
+      });
+    });
+
+    return alignmentPoints;
+  }
+
+  // Add these helper functions near the top of the file
+  function calculateMidpoint(points: number[]): Point {
+    return {
+      x: (points[0] + points[2]) / 2,
+      y: (points[1] + points[3]) / 2
+    };
+  }
+
+  function calculateNormalVector(points: number[]): Point {
+    const dx = points[2] - points[0];
+    const dy = points[3] - points[1];
+    const length = Math.sqrt(dx * dx + dy * dy);
+    
+    // Normalize the normal vector
+    return {
+      x: -dy / length,
+      y: dx / length
+    };
+  }
+
+  function calculateExteriorMarkerPosition(
+    points: number[], 
+    exteriorSide: 'positive' | 'negative'
+  ): { markerPos: Point, connectionStart: Point } {
+    const MARKER_DISTANCE = 15;
+    const midpoint = calculateMidpoint(points);
+    const normal = calculateNormalVector(points);
+    const direction = exteriorSide === 'positive' ? 1 : -1;
+    
+    return {
+      markerPos: {
+        x: midpoint.x + normal.x * MARKER_DISTANCE * direction,
+        y: midpoint.y + normal.y * MARKER_DISTANCE * direction
+      },
+      connectionStart: midpoint
+    };
+  }
+
+  // Add function to handle exterior marker clicks
+  function handleExteriorMarkerClick(lineId: string, e: any) {
+    e.cancelBubble = true; // Prevent event bubbling
+    
+    setLines(lines.map(line => {
+      if (line.id === lineId) {
+        return {
+          ...line,
+          exteriorSide: line.exteriorSide === 'positive' ? 'negative' : 'positive'
+        };
+      }
+      return line;
+    }));
   }
 
   return (
@@ -724,13 +879,7 @@ export function CroquisCanvas() {
           height={600}
           ref={stageRef}
           onMouseDown={handleStageMouseDown}
-          onMouseMove={(e) => {
-            if (isDraggingWalls) {
-              handleWallDrag(e);
-            } else {
-              handleStageMouseMove(e);
-            }
-          }}
+          onMouseMove={handleStageMouseMove}
           onMouseUp={handleStageMouseUp}
           onClick={handleStageClick}
           className={`border border-gray-200 rounded-lg ${
@@ -741,7 +890,7 @@ export function CroquisCanvas() {
           scaleY={scale}
           x={position.x}
           y={position.y}
-          draggable={mode === "pan" && !isDraggingHandler}
+          draggable={mode === "pan"}
           onDragEnd={(e) => {
             if (!isDraggingHandler) {
               setPosition({
@@ -893,7 +1042,101 @@ export function CroquisCanvas() {
                 />
               );
             })}
+
+            {/* Add alignment guides */}
+            {mode === "draw" && isDrawing && alignmentPoints.map((point, index) => {
+              const currentLine = lines[lines.length - 1];
+              const currentPoint = {
+                x: currentLine.points[2],
+                y: currentLine.points[3]
+              };
+
+              // Only draw guides if points are aligned
+              const isVerticalAlign = Math.abs(point.x - currentPoint.x) < SNAP_THRESHOLD;
+              const isHorizontalAlign = Math.abs(point.y - currentPoint.y) < SNAP_THRESHOLD;
+
+              return (
+                <React.Fragment key={`guide-${index}`}>
+                  {isVerticalAlign && (
+                    <Line
+                      points={[
+                        point.x,
+                        Math.min(point.y, currentPoint.y),
+                        point.x,
+                        Math.max(point.y, currentPoint.y)
+                      ]}
+                      stroke="#2563eb"
+                      strokeWidth={1}
+                      dash={[4, 4]}
+                      opacity={0.5}
+                      listening={false}
+                      perfectDrawEnabled={false}
+                    />
+                  )}
+                  {isHorizontalAlign && (
+                    <Line
+                      points={[
+                        Math.min(point.x, currentPoint.x),
+                        point.y,
+                        Math.max(point.x, currentPoint.x),
+                        point.y
+                      ]}
+                      stroke="#2563eb"
+                      strokeWidth={1}
+                      dash={[4, 4]}
+                      opacity={0.5}
+                      listening={false}
+                      perfectDrawEnabled={false}
+                    />
+                  )}
+                </React.Fragment>
+              );
+            })}
+
+            {/* Add exterior markers */}
+            {lines.map((line) => {
+              const { markerPos, connectionStart } = calculateExteriorMarkerPosition(
+                line.points,
+                line.exteriorSide
+              );
+              
+              return (
+                <React.Fragment key={`exterior-${line.id}`}>
+                  <Line
+                    points={[
+                      connectionStart.x,
+                      connectionStart.y,
+                      markerPos.x,
+                      markerPos.y
+                    ]}
+                    stroke={line.selected ? "#2563eb" : "#000"}
+                    strokeWidth={1}
+                    perfectDrawEnabled={false}
+                    listening={false}
+                  />
+                  <Circle
+                    x={markerPos.x}
+                    y={markerPos.y}
+                    radius={3}
+                    fill={line.selected ? "#2563eb" : "#000"}
+                    stroke={line.selected ? "#2563eb" : "#000"}
+                    strokeWidth={1}
+                    perfectDrawEnabled={false}
+                    onClick={(e) => handleExteriorMarkerClick(line.id, e)}
+                    onTap={(e) => handleExteriorMarkerClick(line.id, e)}
+                    hitStrokeWidth={10}
+                  />
+                </React.Fragment>
+              );
+            })}
           </Layer>
+
+          {/* Add the WindRose component */}
+          <WindRose 
+            x={800 - WIND_ROSE_MARGIN - WIND_ROSE_SIZE/2}
+            y={WIND_ROSE_MARGIN + WIND_ROSE_SIZE/2}
+            size={WIND_ROSE_SIZE}
+          />
         </Stage>
       </div>
 
