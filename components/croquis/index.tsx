@@ -1,8 +1,7 @@
 "use client";
 
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Stage, Layer, Line, Circle, Rect, Text } from "react-konva";
-import { useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { 
   MousePointer2, 
@@ -19,6 +18,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { WindowsPanel, Window, LineWithWindows } from "./WindowsPanel";
 import { WindRose } from "./WindRose";
+import { MapComponent } from './MapComponent';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import LayerSwitcher from 'ol-layerswitcher';
+import 'ol-layerswitcher/dist/ol-layerswitcher.css';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 interface Point {
   x: number;
@@ -41,7 +45,12 @@ interface SelectionRect {
   isWindowSelection: boolean;
 }
 
-type DrawingMode = "select" | "draw" | "edit" | "split" | "pan" | "moveWalls";
+type DrawingMode = "select" | "draw" | "edit" | "split" | "pan" | "moveWalls" | "fillet";
+
+interface ConnectionInfo {
+  isConnected: boolean;
+  connectedTo: LineElement | null;
+}
 
 export function CroquisCanvas() {
   const [lines, setLines] = useState<LineElement[]>([]);
@@ -60,7 +69,8 @@ export function CroquisCanvas() {
   const [alignmentPoints, setAlignmentPoints] = useState<Point[]>([]);
   const [isMiddleMousePanning, setIsMiddleMousePanning] = useState(false);
   const [lastMousePosition, setLastMousePosition] = useState<Point | null>(null);
-  
+  const [filletLines, setFilletLines] = useState<string[]>([]);
+
   const stageRef = useRef(null);
   const layerRef = useRef<Konva.Layer>(null);
 
@@ -115,7 +125,7 @@ export function CroquisCanvas() {
 
   // Helper function to handle point dragging with snapping
   function handlePointDrag(lineId: string, isStart: boolean, pos: Point) {
-    const nearestPoint = findNearestPoint(pos);
+    const nearestPoint = findNearestPoint(pos, '');
     const finalPos = nearestPoint || pos;
 
     const newLines = lines.map(l => {
@@ -157,7 +167,8 @@ export function CroquisCanvas() {
         id: Date.now().toString(),
         points: [startPos.x, startPos.y, startPos.x, startPos.y],
         selected: false,
-        exteriorSide: 'positive'
+        exteriorSide: 'positive',
+        windows: []
       };
       
       setLines([...lines, newLine]);
@@ -362,6 +373,9 @@ export function CroquisCanvas() {
       }));
       setLines(updatedLines);
       setSelectedLine(lineId);
+    } else if (mode === "fillet") {
+      e.cancelBubble = true;
+      handleFilletClick(lineId);
     }
   }
 
@@ -766,378 +780,619 @@ export function CroquisCanvas() {
     }));
   }
 
+  // Add these helper functions
+  function findLineIntersection(
+    x1: number, y1: number, x2: number, y2: number,
+    x3: number, y3: number, x4: number, y4: number
+  ): Point | null {
+    const denominator = ((x2 - x1) * (y4 - y3)) - ((y2 - y1) * (x4 - x3));
+    if (denominator === 0) return null;
+    
+    const t = (((x4 - x3) * (y1 - y3)) - ((y4 - y3) * (x1 - x3))) / denominator;
+    
+    return {
+      x: x1 + t * (x2 - x1),
+      y: y1 + t * (y2 - y1)
+    };
+  }
+
+  function arePointsEqual(p1: Point, p2: Point, tolerance: number = 0.1): boolean {
+    return Math.abs(p1.x - p2.x) <= tolerance && Math.abs(p1.y - p2.y) <= tolerance;
+  }
+
+  function findConnectedEndpoint(line: LineElement, otherLines: LineElement[]): {
+    startConnection: ConnectionInfo;
+    endConnection: ConnectionInfo;
+  } {
+    const startPoint = { x: line.points[0], y: line.points[1] };
+    const endPoint = { x: line.points[2], y: line.points[3] };
+    
+    let startConnection: ConnectionInfo = { isConnected: false, connectedTo: null };
+    let endConnection: ConnectionInfo = { isConnected: false, connectedTo: null };
+
+    for (const otherLine of otherLines) {
+      if (otherLine.id === line.id) continue;
+
+      const otherStart = { x: otherLine.points[0], y: otherLine.points[1] };
+      const otherEnd = { x: otherLine.points[2], y: otherLine.points[3] };
+
+      if (arePointsEqual(startPoint, otherStart) || arePointsEqual(startPoint, otherEnd)) {
+        startConnection = { isConnected: true, connectedTo: otherLine };
+      }
+
+      if (arePointsEqual(endPoint, otherStart) || arePointsEqual(endPoint, otherEnd)) {
+        endConnection = { isConnected: true, connectedTo: otherLine };
+      }
+    }
+
+    return { startConnection, endConnection };
+  }
+
+  function trimLinesToIntersection(lines: LineElement[], firstLineId: string, secondLineId: string): LineElement[] {
+    const firstLine = lines.find(l => l.id === firstLineId);
+    const secondLine = lines.find(l => l.id === secondLineId);
+    
+    if (!firstLine || !secondLine) return lines;
+
+    const otherLines = lines.filter(l => l.id !== firstLineId && l.id !== secondLineId);
+    
+    // Check for connected endpoints
+    const firstLineConnections = findConnectedEndpoint(firstLine, otherLines);
+    const secondLineConnections = findConnectedEndpoint(secondLine, otherLines);
+    
+    const intersection = findLineIntersection(
+      firstLine.points[0], firstLine.points[1], firstLine.points[2], firstLine.points[3],
+      secondLine.points[0], secondLine.points[1], secondLine.points[2], secondLine.points[3]
+    );
+    
+    if (!intersection) return lines;
+    
+    return lines.map(line => {
+      if (line.id === firstLineId) {
+        // For first line: determine which end to move based on connections
+        let shouldMoveStart = false;
+        
+        if (firstLineConnections.startConnection.isConnected && 
+            !firstLineConnections.endConnection.isConnected) {
+          shouldMoveStart = false; // Move end point if start is connected
+        } else if (!firstLineConnections.startConnection.isConnected && 
+                   firstLineConnections.endConnection.isConnected) {
+          shouldMoveStart = true; // Move start point if end is connected
+        } else if (!firstLineConnections.startConnection.isConnected && 
+                   !firstLineConnections.endConnection.isConnected) {
+          // If no connections, move the closest point
+          shouldMoveStart = Math.hypot(
+            line.points[0] - intersection.x,
+            line.points[1] - intersection.y
+          ) < Math.hypot(
+            line.points[2] - intersection.x,
+            line.points[3] - intersection.y
+          );
+        } else {
+          // Both ends are connected, don't modify the line
+          return line;
+        }
+        
+        return {
+          ...line,
+          points: shouldMoveStart
+            ? [intersection.x, intersection.y, line.points[2], line.points[3]]
+            : [line.points[0], line.points[1], intersection.x, intersection.y]
+        };
+      }
+      
+      if (line.id === secondLineId) {
+        // For second line: determine which end to move based on connections
+        let shouldMoveStart = false;
+        
+        if (secondLineConnections.startConnection.isConnected && 
+            !secondLineConnections.endConnection.isConnected) {
+          shouldMoveStart = false; // Move end point if start is connected
+        } else if (!secondLineConnections.startConnection.isConnected && 
+                   secondLineConnections.endConnection.isConnected) {
+          shouldMoveStart = true; // Move start point if end is connected
+        } else if (!secondLineConnections.startConnection.isConnected && 
+                   !secondLineConnections.endConnection.isConnected) {
+          // If no connections, move the closest point
+          shouldMoveStart = Math.hypot(
+            line.points[0] - intersection.x,
+            line.points[1] - intersection.y
+          ) < Math.hypot(
+            line.points[2] - intersection.x,
+            line.points[3] - intersection.y
+          );
+        } else {
+          // Both ends are connected, don't modify the line
+          return line;
+        }
+        
+        return {
+          ...line,
+          points: shouldMoveStart
+            ? [intersection.x, intersection.y, line.points[2], line.points[3]]
+            : [line.points[0], line.points[1], intersection.x, intersection.y]
+        };
+      }
+      
+      return line;
+    });
+  }
+
+  // Add this handler
+  function handleFilletClick(lineId: string) {
+    if (mode !== "fillet") return;
+    
+    if (filletLines.length === 0) {
+      setFilletLines([lineId]);
+    } else if (filletLines.length === 1 && filletLines[0] !== lineId) {
+      const updatedLines = trimLinesToIntersection(lines, filletLines[0], lineId);
+      setLines(updatedLines);
+      setFilletLines([]);
+    }
+  }
+
   return (
     <div className="flex gap-4">
       <div className="flex flex-col gap-4">
         <div className="flex gap-2 items-center">
-          <Button
-            variant={mode === "select" ? "default" : "outline"}
-            onClick={() => setMode("select")}
-          >
-            <MousePointer2 className="w-4 h-4 mr-2" />
-            Select
-          </Button>
-          <Button
-            variant={mode === "draw" ? "default" : "outline"}
-            onClick={() => setMode("draw")}
-          >
-            <PenLine className="w-4 h-4 mr-2" />
-            Draw
-          </Button>
-          <Button
-            variant={mode === "pan" ? "default" : "outline"}
-            onClick={() => setMode("pan")}
-          >
-            <Move className="w-4 h-4 mr-2" />
-            Pan
-          </Button>
-          <Button
-            variant={mode === "split" ? "default" : "outline"}
-            onClick={() => setMode("split")}
-          >
-            <Scissors className="w-4 h-4 mr-2" />
-            Split
-          </Button>
-          <Button
-            variant={isOrthogonal ? "default" : "outline"}
-            onClick={() => setIsOrthogonal(!isOrthogonal)}
-          >
-            <LayoutGrid className="w-4 h-4 mr-2" />
-            Orthogonal
-          </Button>
-          <Button
-            variant="destructive"
-            onClick={handleDeleteSelected}
-            disabled={!lines.some(line => line.selected)}
-          >
-            <Trash2 className="w-4 h-4 mr-2" />
-            Delete
-          </Button>
-          <Button
-            variant={mode === "moveWalls" ? "default" : "outline"}
-            onClick={() => setMode("moveWalls")}
-          >
-            <Move className="w-4 h-4 mr-2" />
-            Move Walls
-          </Button>
-          <Button
-            variant="destructive"
-            onClick={handleClearAll}
-            className="ml-2"
-          >
-            <Trash2 className="w-4 h-4 mr-2" />
-            Clear All
-          </Button>
-          
-          <div className="ml-auto flex gap-2">
-            <Button
-              variant="outline"
-              onClick={handleZoomIn}
-              title="Zoom In"
-            >
-              <Plus className="w-4 h-4" />
-            </Button>
-            <Button
-              variant="outline"
-              onClick={handleZoomOut}
-              title="Zoom Out"
-            >
-              <Minus className="w-4 h-4" />
-            </Button>
-            <Button
-              variant="outline"
-              onClick={handleResetZoom}
-              title="Reset Zoom"
-            >
-              <ZoomIn className="w-4 h-4" />
-            </Button>
-          </div>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant={mode === "select" ? "default" : "outline"}
+                  onClick={() => setMode("select")}
+                  size="icon"
+                >
+                  <MousePointer2 className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Select</TooltipContent>
+            </Tooltip>
 
-          {activeSelectedLine && (
-            <div className="flex items-center gap-2 ml-4">
-              <Label htmlFor="lineLength">Length:</Label>
-              <Input
-                id="lineLength"
-                type="number"
-                min="0"
-                step="1"
-                className="w-24"
-                value={Math.round(getLineLength(activeSelectedLine.points))}
-                onChange={(e) => {
-                  const newLength = parseFloat(e.target.value);
-                  if (!isNaN(newLength) && newLength > 0) {
-                    handleLengthChange(activeSelectedLine.id, newLength);
-                  }
-                }}
-              />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant={mode === "draw" ? "default" : "outline"}
+                  onClick={() => setMode("draw")}
+                  size="icon"
+                >
+                  <PenLine className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Draw</TooltipContent>
+            </Tooltip>
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant={mode === "pan" ? "default" : "outline"}
+                  onClick={() => setMode("pan")}
+                  size="icon"
+                >
+                  <Move className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Pan</TooltipContent>
+            </Tooltip>
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant={mode === "split" ? "default" : "outline"}
+                  onClick={() => setMode("split")}
+                  size="icon"
+                >
+                  <Scissors className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Split</TooltipContent>
+            </Tooltip>
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant={isOrthogonal ? "default" : "outline"}
+                  onClick={() => setIsOrthogonal(!isOrthogonal)}
+                  size="icon"
+                >
+                  <LayoutGrid className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Orthogonal</TooltipContent>
+            </Tooltip>
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="destructive"
+                  onClick={handleDeleteSelected}
+                  disabled={!lines.some(line => line.selected)}
+                  size="icon"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Delete Selected</TooltipContent>
+            </Tooltip>
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant={mode === "moveWalls" ? "default" : "outline"}
+                  onClick={() => setMode("moveWalls")}
+                  size="icon"
+                >
+                  <Move className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Move Walls</TooltipContent>
+            </Tooltip>
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="destructive"
+                  onClick={handleClearAll}
+                  size="icon"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Clear All</TooltipContent>
+            </Tooltip>
+
+            <div className="ml-auto flex gap-2">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    onClick={handleZoomIn}
+                    size="icon"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Zoom In</TooltipContent>
+              </Tooltip>
+
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    onClick={handleZoomOut}
+                    size="icon"
+                  >
+                    <Minus className="w-4 h-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Zoom Out</TooltipContent>
+              </Tooltip>
+
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    onClick={handleResetZoom}
+                    size="icon"
+                  >
+                    <ZoomIn className="w-4 h-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Reset Zoom</TooltipContent>
+              </Tooltip>
             </div>
-          )}
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant={mode === "fillet" ? "default" : "outline"}
+                  onClick={() => {
+                    setMode("fillet");
+                    setFilletLines([]);
+                  }}
+                  size="icon"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="w-4 h-4"
+                  >
+                    <path d="M 4 20 L 12 12" />
+                    <path d="M 12 12 L 20 4" />
+                  </svg>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Fillet (Join Lines)</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </div>
         
-        <Stage
-          width={800}
-          height={600}
-          ref={stageRef}
-          onMouseDown={handleStageMouseDown}
-          onMouseMove={handleStageMouseMove}
-          onMouseUp={handleStageMouseUp}
-          onClick={handleStageClick}
-          className={`border border-gray-200 rounded-lg ${
-            mode === "pan" ? 'cursor-grab active:cursor-grabbing' : 
-            mode === "moveWalls" ? 'cursor-move' : ''
-          }`}
-          scaleX={scale}
-          scaleY={scale}
-          x={position.x}
-          y={position.y}
-          draggable={mode === "pan"}
-          onDragEnd={(e) => {
-            if (!isDraggingHandler) {
-              setPosition({
-                x: e.target.x(),
-                y: e.target.y()
-              });
-            }
-          }}
-        >
-          <Layer ref={layerRef} listening={true}>
-            {lines.map((line) => (
-              <Line
-                key={`line-${line.id}`}
-                points={line.points}
-                stroke={line.selected ? "#2563eb" : "#000"}
-                strokeWidth={line.selected ? 3 : 2}
-                hitStrokeWidth={20}
-                perfectDrawEnabled={false}
-                listening={!line.selected}
-                onClick={(e) => handleLineClick(line.id, e)}
-                onTap={(e) => handleLineClick(line.id, e)}
-                onDblClick={(e) => handleLineSplit(line.id, e)}
-                onDblTap={(e) => handleLineSplit(line.id, e)}
-                onMouseEnter={() => handleLineHover(line.id)}
-                onMouseLeave={handleLineHoverEnd}
-                lineCap="round"
-                lineJoin="round"
-              />
-            ))}
-            
-            {lines.map((line) => line.selected && (
-              <React.Fragment key={`handlers-${line.id}`}>
-                <Circle
-                  x={line.points[0]}
-                  y={line.points[1]}
-                  radius={5}
-                  fill="#fff"
-                  stroke="#2563eb"
-                  strokeWidth={2}
-                  draggable
-                  listening={true}
-                  perfectDrawEnabled={false}
-                  shadowForStrokeEnabled={false}
-                  transformsEnabled="position"
-                  hitStrokeWidth={12}
-                  onDragStart={handlePointDragStart}
-                  onDragEnd={handlePointDragEnd}
-                  onDragMove={(e) => {
-                    handlePointDrag(line.id, true, e.target.position());
-                  }}
-                />
-                {mode === "split" && (
+        <div className="relative w-[800px] h-[600px]">
+          {/* Replace map div with MapComponent */}
+          <MapComponent className="absolute inset-0 z-0" />
+          
+          {/* Konva Stage Container */}
+          <div className="absolute inset-0 z-10">
+            <Stage
+              width={800}
+              height={600}
+              ref={stageRef}
+              onMouseDown={handleStageMouseDown}
+              onMouseMove={handleStageMouseMove}
+              onMouseUp={handleStageMouseUp}
+              onClick={handleStageClick}
+              className={`${
+                mode === "pan" ? 'cursor-grab active:cursor-grabbing' : 
+                mode === "moveWalls" ? 'cursor-move' : ''
+              }`}
+              scaleX={scale}
+              scaleY={scale}
+              x={position.x}
+              y={position.y}
+              draggable={mode === "pan"}
+              onDragEnd={(e) => {
+                if (!isDraggingHandler) {
+                  setPosition({
+                    x: e.target.x(),
+                    y: e.target.y()
+                  });
+                }
+              }}
+            >
+              <Layer 
+                ref={layerRef}
+                listening={true}
+                clearBeforeDraw={true}
+              >
+                {lines.map((line) => (
+                  <Line
+                    key={`line-${line.id}`}
+                    points={line.points}
+                    stroke={line.selected ? "#2563eb" : "#000"}
+                    strokeWidth={line.selected ? 3 : 2}
+                    hitStrokeWidth={20}
+                    perfectDrawEnabled={false}
+                    listening={!line.selected}
+                    onClick={(e) => handleLineClick(line.id, e)}
+                    onTap={(e) => handleLineClick(line.id, e)}
+                    onDblClick={(e) => handleLineSplit(line.id, e)}
+                    onDblTap={(e) => handleLineSplit(line.id, e)}
+                    onMouseEnter={() => handleLineHover(line.id)}
+                    onMouseLeave={handleLineHoverEnd}
+                    lineCap="round"
+                    lineJoin="round"
+                  />
+                ))}
+                
+                {lines.map((line) => line.selected && (
+                  <React.Fragment key={`handlers-${line.id}`}>
+                    <Circle
+                      x={line.points[0]}
+                      y={line.points[1]}
+                      radius={5}
+                      fill="#fff"
+                      stroke="#2563eb"
+                      strokeWidth={2}
+                      draggable
+                      listening={true}
+                      perfectDrawEnabled={false}
+                      shadowForStrokeEnabled={false}
+                      transformsEnabled="position"
+                      hitStrokeWidth={12}
+                      onDragStart={handlePointDragStart}
+                      onDragEnd={handlePointDragEnd}
+                      onDragMove={(e) => {
+                        handlePointDrag(line.id, true, e.target.position());
+                      }}
+                    />
+                    {mode === "split" && (
+                      <Circle
+                        x={(line.points[0] + line.points[2]) / 2}
+                        y={(line.points[1] + line.points[3]) / 2}
+                        radius={5}
+                        fill="#fff"
+                        stroke="#2563eb"
+                        strokeWidth={2}
+                        perfectDrawEnabled={false}
+                        shadowForStrokeEnabled={false}
+                        transformsEnabled="position"
+                        listening={true}
+                      />
+                    )}
+                    <Circle
+                      x={line.points[2]}
+                      y={line.points[3]}
+                      radius={5}
+                      fill="#fff"
+                      stroke="#2563eb"
+                      strokeWidth={2}
+                      draggable
+                      listening={true}
+                      perfectDrawEnabled={false}
+                      shadowForStrokeEnabled={false}
+                      transformsEnabled="position"
+                      hitStrokeWidth={12}
+                      onDragStart={handlePointDragStart}
+                      onDragEnd={handlePointDragEnd}
+                      onDragMove={(e) => {
+                        handlePointDrag(line.id, false, e.target.position());
+                      }}
+                    />
+                  </React.Fragment>
+                ))}
+
+                {/* Snap point indicator while drawing */}
+                {snapPoint && mode === "draw" && (
                   <Circle
-                    x={(line.points[0] + line.points[2]) / 2}
-                    y={(line.points[1] + line.points[3]) / 2}
-                    radius={5}
-                    fill="#fff"
+                    x={snapPoint.x}
+                    y={snapPoint.y}
+                    radius={6}
+                    fill="rgba(37, 99, 235, 0.3)"
                     stroke="#2563eb"
                     strokeWidth={2}
-                    perfectDrawEnabled={false}
-                    shadowForStrokeEnabled={false}
-                    transformsEnabled="position"
-                    listening={true}
                   />
                 )}
-                <Circle
-                  x={line.points[2]}
-                  y={line.points[3]}
-                  radius={5}
-                  fill="#fff"
-                  stroke="#2563eb"
-                  strokeWidth={2}
-                  draggable
-                  listening={true}
-                  perfectDrawEnabled={false}
-                  shadowForStrokeEnabled={false}
-                  transformsEnabled="position"
-                  hitStrokeWidth={12}
-                  onDragStart={handlePointDragStart}
-                  onDragEnd={handlePointDragEnd}
-                  onDragMove={(e) => {
-                    handlePointDrag(line.id, false, e.target.position());
-                  }}
-                />
-              </React.Fragment>
-            ))}
 
-            {/* Snap point indicator while drawing */}
-            {snapPoint && mode === "draw" && (
-              <Circle
-                x={snapPoint.x}
-                y={snapPoint.y}
-                radius={6}
-                fill="rgba(37, 99, 235, 0.3)"
-                stroke="#2563eb"
-                strokeWidth={2}
-              />
-            )}
-
-            {/* Add selection rectangle */}
-            {selectionRect && (
-              <React.Fragment>
-                <Rect
-                  x={selectionRect.startX}
-                  y={selectionRect.startY}
-                  width={selectionRect.width}
-                  height={selectionRect.height}
-                  stroke={selectionRect.isWindowSelection ? "#2563eb" : "#22c55e"}
-                  fill={selectionRect.isWindowSelection ? 
-                    "rgba(37, 99, 235, 0.1)" : 
-                    "rgba(34, 197, 94, 0.1)"
-                  }
-                  dash={[4, 4]}
-                />
-              </React.Fragment>
-            )}
-
-            {lines.map((line) => {
-              const length = Math.round(getLineLength(line.points));
-              const midX = (line.points[0] + line.points[2]) / 2;
-              const midY = (line.points[1] + line.points[3]) / 2;
-              
-              // Calculate angle for text rotation
-              const angle = Math.atan2(
-                line.points[3] - line.points[1],
-                line.points[2] - line.points[0]
-              ) * 180 / Math.PI;
-              
-              // Offset the text slightly above the line
-              const offset = 15;
-              const perpAngle = angle * Math.PI / 180 + Math.PI / 2;
-              const textX = midX + Math.cos(perpAngle) * offset;
-              const textY = midY + Math.sin(perpAngle) * offset;
-
-              return (
-                <Text
-                  key={`length-${line.id}`}
-                  x={textX}
-                  y={textY}
-                  text={`${length}`}
-                  fontSize={14}
-                  fill={line.selected ? "#2563eb" : "#000"}
-                  rotation={angle > 90 || angle < -90 ? angle + 180 : angle}
-                  offsetX={20}
-                  offsetY={0}
-                  perfectDrawEnabled={false}
-                  shadowForStrokeEnabled={false}
-                  transformsEnabled="all"
-                />
-              );
-            })}
-
-            {/* Add alignment guides */}
-            {mode === "draw" && isDrawing && alignmentPoints.map((point, index) => {
-              const currentLine = lines[lines.length - 1];
-              const currentPoint = {
-                x: currentLine.points[2],
-                y: currentLine.points[3]
-              };
-
-              // Only draw guides if points are aligned
-              const isVerticalAlign = Math.abs(point.x - currentPoint.x) < SNAP_THRESHOLD;
-              const isHorizontalAlign = Math.abs(point.y - currentPoint.y) < SNAP_THRESHOLD;
-
-              return (
-                <React.Fragment key={`guide-${index}`}>
-                  {isVerticalAlign && (
-                    <Line
-                      points={[
-                        point.x,
-                        Math.min(point.y, currentPoint.y),
-                        point.x,
-                        Math.max(point.y, currentPoint.y)
-                      ]}
-                      stroke="#2563eb"
-                      strokeWidth={1}
+                {/* Add selection rectangle */}
+                {selectionRect && (
+                  <React.Fragment>
+                    <Rect
+                      x={selectionRect.startX}
+                      y={selectionRect.startY}
+                      width={selectionRect.width}
+                      height={selectionRect.height}
+                      stroke={selectionRect.isWindowSelection ? "#2563eb" : "#22c55e"}
+                      fill={selectionRect.isWindowSelection ? 
+                        "rgba(37, 99, 235, 0.1)" : 
+                        "rgba(34, 197, 94, 0.1)"
+                      }
                       dash={[4, 4]}
-                      opacity={0.5}
-                      listening={false}
-                      perfectDrawEnabled={false}
                     />
-                  )}
-                  {isHorizontalAlign && (
-                    <Line
-                      points={[
-                        Math.min(point.x, currentPoint.x),
-                        point.y,
-                        Math.max(point.x, currentPoint.x),
-                        point.y
-                      ]}
-                      stroke="#2563eb"
-                      strokeWidth={1}
-                      dash={[4, 4]}
-                      opacity={0.5}
-                      listening={false}
-                      perfectDrawEnabled={false}
-                    />
-                  )}
-                </React.Fragment>
-              );
-            })}
+                  </React.Fragment>
+                )}
 
-            {/* Add exterior markers */}
-            {lines.map((line) => {
-              const { markerPos, connectionStart } = calculateExteriorMarkerPosition(
-                line.points,
-                line.exteriorSide
-              );
-              
-              return (
-                <React.Fragment key={`exterior-${line.id}`}>
+                {lines.map((line) => {
+                  const length = Math.round(getLineLength(line.points));
+                  const midX = (line.points[0] + line.points[2]) / 2;
+                  const midY = (line.points[1] + line.points[3]) / 2;
+                  
+                  // Calculate angle for text rotation
+                  const angle = Math.atan2(
+                    line.points[3] - line.points[1],
+                    line.points[2] - line.points[0]
+                  ) * 180 / Math.PI;
+                  
+                  // Offset the text slightly above the line
+                  const offset = 15;
+                  const perpAngle = angle * Math.PI / 180 + Math.PI / 2;
+                  const textX = midX + Math.cos(perpAngle) * offset;
+                  const textY = midY + Math.sin(perpAngle) * offset;
+
+                  return (
+                    <Text
+                      key={`length-${line.id}`}
+                      x={textX}
+                      y={textY}
+                      text={`${length}`}
+                      fontSize={14}
+                      fill={line.selected ? "#2563eb" : "#000"}
+                      rotation={angle > 90 || angle < -90 ? angle + 180 : angle}
+                      offsetX={20}
+                      offsetY={0}
+                      perfectDrawEnabled={false}
+                      shadowForStrokeEnabled={false}
+                      transformsEnabled="all"
+                    />
+                  );
+                })}
+
+                {/* Add alignment guides */}
+                {mode === "draw" && isDrawing && alignmentPoints.map((point, index) => {
+                  const currentLine = lines[lines.length - 1];
+                  const currentPoint = {
+                    x: currentLine.points[2],
+                    y: currentLine.points[3]
+                  };
+
+                  // Only draw guides if points are aligned
+                  const isVerticalAlign = Math.abs(point.x - currentPoint.x) < SNAP_THRESHOLD;
+                  const isHorizontalAlign = Math.abs(point.y - currentPoint.y) < SNAP_THRESHOLD;
+
+                  return (
+                    <React.Fragment key={`guide-${index}`}>
+                      {isVerticalAlign && (
+                        <Line
+                          points={[
+                            point.x,
+                            Math.min(point.y, currentPoint.y),
+                            point.x,
+                            Math.max(point.y, currentPoint.y)
+                          ]}
+                          stroke="#2563eb"
+                          strokeWidth={1}
+                          dash={[4, 4]}
+                          opacity={0.5}
+                          listening={false}
+                          perfectDrawEnabled={false}
+                        />
+                      )}
+                      {isHorizontalAlign && (
+                        <Line
+                          points={[
+                            Math.min(point.x, currentPoint.x),
+                            point.y,
+                            Math.max(point.x, currentPoint.x),
+                            point.y
+                          ]}
+                          stroke="#2563eb"
+                          strokeWidth={1}
+                          dash={[4, 4]}
+                          opacity={0.5}
+                          listening={false}
+                          perfectDrawEnabled={false}
+                        />
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+
+                {/* Add exterior markers */}
+                {lines.map((line) => {
+                  const { markerPos, connectionStart } = calculateExteriorMarkerPosition(
+                    line.points,
+                    line.exteriorSide
+                  );
+                  
+                  return (
+                    <React.Fragment key={`exterior-${line.id}`}>
+                      <Line
+                        points={[
+                          connectionStart.x,
+                          connectionStart.y,
+                          markerPos.x,
+                          markerPos.y
+                        ]}
+                        stroke={line.selected ? "#2563eb" : "#000"}
+                        strokeWidth={1}
+                        perfectDrawEnabled={false}
+                        listening={false}
+                      />
+                      <Circle
+                        x={markerPos.x}
+                        y={markerPos.y}
+                        radius={3}
+                        fill={line.selected ? "#2563eb" : "#000"}
+                        stroke={line.selected ? "#2563eb" : "#000"}
+                        strokeWidth={1}
+                        perfectDrawEnabled={false}
+                        onClick={(e) => handleExteriorMarkerClick(line.id, e)}
+                        onTap={(e) => handleExteriorMarkerClick(line.id, e)}
+                        hitStrokeWidth={10}
+                      />
+                    </React.Fragment>
+                  );
+                })}
+
+                {/* Add visual feedback for the first selected line */}
+                {mode === "fillet" && filletLines.length === 1 && (
                   <Line
-                    points={[
-                      connectionStart.x,
-                      connectionStart.y,
-                      markerPos.x,
-                      markerPos.y
-                    ]}
-                    stroke={line.selected ? "#2563eb" : "#000"}
-                    strokeWidth={1}
-                    perfectDrawEnabled={false}
+                    points={lines.find(l => l.id === filletLines[0])?.points || []}
+                    stroke="#2563eb"
+                    strokeWidth={3}
+                    dash={[5, 5]}
                     listening={false}
-                  />
-                  <Circle
-                    x={markerPos.x}
-                    y={markerPos.y}
-                    radius={3}
-                    fill={line.selected ? "#2563eb" : "#000"}
-                    stroke={line.selected ? "#2563eb" : "#000"}
-                    strokeWidth={1}
                     perfectDrawEnabled={false}
-                    onClick={(e) => handleExteriorMarkerClick(line.id, e)}
-                    onTap={(e) => handleExteriorMarkerClick(line.id, e)}
-                    hitStrokeWidth={10}
                   />
-                </React.Fragment>
-              );
-            })}
-          </Layer>
-
-          {/* Add the WindRose component */}
-          <WindRose 
-            x={800 - WIND_ROSE_MARGIN - WIND_ROSE_SIZE/2}
-            y={WIND_ROSE_MARGIN + WIND_ROSE_SIZE/2}
-            size={WIND_ROSE_SIZE}
-          />
-        </Stage>
+                )}
+              </Layer>
+            </Stage>
+          </div>
+        </div>
       </div>
 
       <WindowsPanel
