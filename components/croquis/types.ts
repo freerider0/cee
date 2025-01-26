@@ -20,6 +20,7 @@ export interface LineElement {
   isHovered?: boolean;
   exteriorSide: 'positive' | 'negative';
   windows?: Window[];
+  level: number;
 }
 
 export type DrawingMode = "select" | "draw" | "edit" | "split" | "pan" | "moveWalls" | "fillet";

@@ -193,12 +193,12 @@ export function useLineHandlers({
     };
 
     // Only use snap point if it exists in the current state
-    const finalPos = moveWallsState.snapPoint || pos;
+    const basePoint = findNearestPoint(pos, '', lines, false) || pos;
 
     if (!moveWallsState.isSelecting) {
       setMoveWallsState({
         isSelecting: true,
-        basePoint: finalPos,
+        basePoint: basePoint,
         destinationPoint: null,
         snapPoint: null
       });
@@ -229,7 +229,6 @@ export function useLineHandlers({
         destinationPoint: null,
         snapPoint: null
       });
-      setMode("select");
     }
   }
 
@@ -245,10 +244,7 @@ export function useLineHandlers({
 
     // Find nearest snap point
     const nearestPoint = findNearestPoint(pos, '', lines);
-    const snapPoint = nearestPoint && 
-      Math.sqrt(Math.pow(pos.x - nearestPoint.x, 2) + Math.pow(pos.y - nearestPoint.y, 2)) <= 10 
-      ? nearestPoint 
-      : null;
+    const snapPoint = nearestPoint || null;
 
     setMoveWallsState(prev => ({
       ...prev,

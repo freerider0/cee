@@ -12,6 +12,7 @@ export function useDrawing() {
   const [isOrthogonal, setIsOrthogonal] = useState(false);
   const [alignmentPoints, setAlignmentPoints] = useState<Point[]>([]);
   const [selectedLine, setSelectedLine] = useState<string | null>(null);
+  const [currentLevel, setCurrentLevel] = useState<number>(0);
 
   const startDrawing = useCallback((point: Point) => {
     const newLine: LineElement = {
@@ -19,11 +20,12 @@ export function useDrawing() {
       points: [point.x, point.y, point.x, point.y],
       selected: false,
       exteriorSide: 'positive',
-      windows: []
+      windows: [],
+      level: currentLevel
     };
     setLines(prev => [...prev, newLine]);
     setIsDrawing(true);
-  }, []);
+  }, [currentLevel]);
 
   const finishDrawing = useCallback(() => {
     setIsDrawing(false);
@@ -125,6 +127,8 @@ export function useDrawing() {
     setAlignmentPoints,
     selectedLine,
     setSelectedLine,
+    currentLevel,
+    setCurrentLevel,
     startDrawing,
     finishDrawing,
     handleDrawing

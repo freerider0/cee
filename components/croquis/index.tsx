@@ -26,12 +26,14 @@ import LayerSwitcher from 'ol-layerswitcher';
 import 'ol-layerswitcher/dist/ol-layerswitcher.css';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useZoomAndPan } from './hooks/useZoomAndPan';
-import { findNearestPoint, getOrthogonalPoint, calculateExteriorMarkerPosition, calculateMidpoint, calculateNormalVector, trimLinesToIntersection, getLineLength, findAlignmentPoints, findConnectedEndpoint, findLineIntersection } from './utils';
+import { findNearestPoint, getOrthogonalPoint, calculateExteriorMarkerPosition, calculateMidpoint, isLineInSelection, calculateNormalVector, trimLinesToIntersection, getLineLength, findAlignmentPoints, findConnectedEndpoint, findLineIntersection } from './utils';
 import { useLineHandlers } from './hooks/useLineHandlers';
 import { ToolbarButtons } from './components/ToolbarButtons';
+import { usePointHandlers } from './hooks/usePointHandlers';
 
 
 export function CroquisCanvas() {
+  const [showMap, setShowMap] = useState(false);
   const [lines, setLines] = useState<LineElement[]>([]);
   const [mode, setMode] = useState<DrawingMode>("select");
   const [isDrawing, setIsDrawing] = useState(false);
@@ -46,6 +48,7 @@ export function CroquisCanvas() {
   const [isMiddleMousePanning, setIsMiddleMousePanning] = useState(false);
   const [lastMousePosition, setLastMousePosition] = useState<Point | null>(null);
   const [filletLines, setFilletLines] = useState<string[]>([]);
+  const [showGrid, setShowGrid] = useState(false);
 
   const stageRef = useRef(null);
   const layerRef = useRef<Konva.Layer>(null);
@@ -56,6 +59,9 @@ export function CroquisCanvas() {
   // Add WindRose constants
   const WIND_ROSE_MARGIN = 20;
   const WIND_ROSE_SIZE = 200;
+
+  // Add this near the top with other constants
+  const GRID_SIZE = 10; // 10px between dots
 
   const {
     handleZoomIn,
@@ -94,127 +100,93 @@ export function CroquisCanvas() {
     setMode
   });
 
-  // Helper function to handle point dragging with snapping
-  function handlePointDrag(lineId: string, isStart: boolean, pos: Point) {
-    const nearestPoint = findNearestPoint(pos, lineId, lines);
-    const finalPos =  nearestPoint || pos;
-
-    console.log('finalPos', finalPos);
-
-    // Find the original line and point position
-    const originalLine = lines.find(l => l.id === lineId);
-  
-    if (!originalLine) return;
-    
-    const originalPoint = {
-      x: isStart ? originalLine.points[0] : originalLine.points[2],
-      y: isStart ? originalLine.points[1] : originalLine.points[3]
-    };
-
-    // Update only selected lines that share the same point
-    const newLines = lines.map(l => {
-      // Skip unselected lines
-      if (!l.selected) return l;
-
-      // Check start point
-      const startMatches = Math.abs(l.points[0] - originalPoint.x) < 0.1 && 
-                          Math.abs(l.points[1] - originalPoint.y) < 0.1;
-      // Check end point
-      const endMatches = Math.abs(l.points[2] - originalPoint.x) < 0.1 && 
-                        Math.abs(l.points[3] - originalPoint.y) < 0.1;
-
-      if (startMatches || endMatches) {
-        return {
-          ...l,
-          points: [
-            startMatches ? finalPos.x : l.points[0],
-            startMatches ? finalPos.y : l.points[1],
-            endMatches ? finalPos.x : l.points[2],
-            endMatches ? finalPos.y : l.points[3]
-          ]
-        };
-      }
-      return l;
-    });
-
-    setLines(newLines);
-    
-    if (layerRef.current) {
-      layerRef.current.batchDraw();
-    }
-  }
+  const {
+    handlePointDrag,
+    handlePointDragStart,
+    handlePointDragEnd
+  } = usePointHandlers({
+    lines,
+    setLines,
+    scale,
+    position,
+    layerRef: layerRef as React.RefObject<Konva.Layer>
+  });
 
   // Handle drawing new lines
   function handleMouseDown(e: any) {
-    if (e.target === e.target.getStage() || e.target.attrs.radius === 6) {
-      if (mode === "moveWalls") {
-        handleMoveWallsMouseDown(e);
-        return;
-      }
-      if (mode === "draw") {
-        const stage = e.target.getStage();
-        const pointerPos = stage.getPointerPosition();
-        const pos = {
-          x: (pointerPos.x - position.x) / scale,
-          y: (pointerPos.y - position.y) / scale
-        };
-        console.log(pos);
-        setIsDrawing(true);
-        
-        // Check if we're starting near a snap point
-        const nearestPoint = findNearestPoint(pos, '', lines);
-        const startPos = nearestPoint || pos;
-        
-        const newLine: LineElement = {
-          id: Date.now().toString(),
-          points: [startPos.x, startPos.y, startPos.x, startPos.y],
-          selected: false,
-          exteriorSide: 'positive',
-          windows: []
-        };
-        
-        setLines([...lines, newLine]);
-      } else if (mode === "select" && e.target === e.target.getStage()) {
-        // Clear selection only on direct stage click
-        const updatedLines = lines.map(line => ({
-          ...line,
-          selected: false
-        }));
-        setLines(updatedLines);
-        setSelectedLine(null);
+    if (mode === "moveWalls") {
+      handleMoveWallsMouseDown(e);
+      return;
+    }
+    if (mode === "draw") {
+      const stage = e.target.getStage();
+      const pointerPos = stage.getPointerPosition();
+      const pos = {
+        x: (pointerPos.x - position.x) / scale,
+        y: (pointerPos.y - position.y) / scale
+      };
+      console.log(pos);
+      setIsDrawing(true);
+      
+      // Check if we're starting near a snap point
+      const nearestPoint = findNearestPoint(pos, '', lines);
+      const startPos = nearestPoint || pos;
+      
+      const newLine: LineElement = {
+        id: Date.now().toString(),
+        points: [startPos.x, startPos.y, startPos.x, startPos.y],
+        selected: false,
+        exteriorSide: 'positive',
+        windows: [],
+        level: 0
+      };
+      
+      setLines([...lines, newLine]);
+    } 
+    else if (mode === "select" && e.target === e.target.getStage()) {
+      // Clear selection only on direct stage click
+      const updatedLines = lines.map(line => ({
+        ...line,
+        selected: false
+      }));
+      setLines(updatedLines);
+      setSelectedLine(null);
 
-        // Then start selection rect if needed
-        const stage = e.target.getStage();
-        const pointerPos = stage.getPointerPosition();
-        const pos = {
-          x: (pointerPos.x - position.x) / scale,
-          y: (pointerPos.y - position.y) / scale
-        };
-        
-        setSelectionRect({
-          startX: pos.x,
-          startY: pos.y,
-          width: 0,
-          height: 0,
-          isWindowSelection: false
-        });
-      }
+      // Then start selection rect if needed
+      const stage = e.target.getStage();
+      const pointerPos = stage.getPointerPosition();
+      const pos = {
+        x: (pointerPos.x - position.x) / scale,
+        y: (pointerPos.y - position.y) / scale
+      };
+      
+      setSelectionRect({
+        startX: pos.x,
+        startY: pos.y,
+        width: 0,
+        height: 0,
+        isWindowSelection: false
+      });
     }
   }
 
 
   // Add new handler for general mouse movement
   function handleStageMouseMove(e: any) {
-    if (mode === "moveWalls") {
-      handleMoveWallsMouseMove(e);
-      return;
-    }
+    // Get the stage
     const stage = e.target.getStage();
+    // Get the pointer position in the canvas coordinates
     const pointerPos = stage.getPointerPosition();
     const pos = {
       x: (pointerPos.x - position.x) / scale,
       y: (pointerPos.y - position.y) / scale
     };
+    // If we're moving walls, handle the movement
+    if (mode === "moveWalls") {
+      handleMoveWallsMouseMove(e);
+      return;
+    }
+   
 
     if (isMiddleMousePanning && lastMousePosition) {
       return;
@@ -252,17 +224,28 @@ export function CroquisCanvas() {
           finalPos = getOrthogonalPoint(startPoint, pos);
         }
         
-        // Find alignment points
-        const alignPoints = findAlignmentPoints(finalPos, currentLine.id);
-        setAlignmentPoints(alignPoints);
+        // Find alignment points for both start and end points
+        const startAlignPoints = findAlignmentPoints(startPoint, currentLine.id, lines);
+        const endAlignPoints = findAlignmentPoints(finalPos, currentLine.id, lines);
+        
+        // Combine alignment points, removing duplicates
+        const combinedAlignPoints = [...startAlignPoints, ...endAlignPoints]
+          .filter((point, index, self) => 
+            index === self.findIndex((p) => p.x === point.x && p.y === point.y)
+          );
+        
+        setAlignmentPoints(combinedAlignPoints);
 
         // Check for alignment and snap to it
         let snappedPos = { ...finalPos };
-        alignPoints.forEach(point => {
-          if (Math.abs(point.x - finalPos.x) < SNAP_THRESHOLD) {
+        combinedAlignPoints.forEach(point => {
+          const distanceX = Math.abs(point.x - finalPos.x);
+          const distanceY = Math.abs(point.y - finalPos.y);
+          
+          if (distanceX < SNAP_THRESHOLD) {
             snappedPos.x = point.x;
           }
-          if (Math.abs(point.y - finalPos.y) < SNAP_THRESHOLD) {
+          if (distanceY < SNAP_THRESHOLD) {
             snappedPos.y = point.y;
           }
         });
@@ -355,124 +338,14 @@ export function CroquisCanvas() {
       setLines(updatedLines);
       setSelectionRect(null);
     }
-    setSelectionRect(null);
   }
 
-  // Add helper function to check if a line is contained in or intersects with rectangle
-  function isLineInSelection(line: LineElement, rect: SelectionRect): boolean {
-    const [x1, y1, x2, y2] = line.points;
-    const rectLeft = Math.min(rect.startX, rect.startX + rect.width);
-    const rectRight = Math.max(rect.startX, rect.startX + rect.width);
-    const rectTop = Math.min(rect.startY, rect.startY + rect.height);
-    const rectBottom = Math.max(rect.startY, rect.startY + rect.height);
 
-    // For window selection (right to left), check if line is fully contained
-    if (rect.isWindowSelection) {
-      return (
-        x1 >= rectLeft && x1 <= rectRight &&
-        x2 >= rectLeft && x2 <= rectRight &&
-        y1 >= rectTop && y1 <= rectBottom &&
-        y2 >= rectTop && y2 <= rectBottom
-      );
-    }
-
-    // For crossing selection (left to right), use Cohen-Sutherland algorithm
-    // Helper function to get point position code relative to rectangle
-    function getPointCode(x: number, y: number): number {
-      let code = 0;
-      if (x < rectLeft) code |= 1;     // left
-      if (x > rectRight) code |= 2;    // right
-      if (y < rectTop) code |= 4;      // top
-      if (y > rectBottom) code |= 8;   // bottom
-      return code;
-    }
-
-    // Get codes for line endpoints
-    const code1 = getPointCode(x1, y1);
-    const code2 = getPointCode(x2, y2);
-
-    // If both points are outside on the same side, no intersection
-    if (code1 & code2) return false;
-
-    // If both points are inside, line is contained
-    if (code1 === 0 && code2 === 0) return true;
-
-    // Check intersection with rectangle edges
-    const m = (y2 - y1) / (x2 - x1); // Line slope
-    
-    // Helper function to check if point is within line segment
-    function isPointInSegment(px: number, py: number): boolean {
-      const buffer = 0.1; // Small buffer for floating point precision
-      return px >= Math.min(x1, x2) - buffer && 
-             px <= Math.max(x1, x2) + buffer && 
-             py >= Math.min(y1, y2) - buffer && 
-             py <= Math.max(y1, y2) + buffer;
-    }
-
-    // Check intersection with vertical edges
-    if (!isFinite(m)) {
-      // Vertical line
-      return x1 >= rectLeft && x1 <= rectRight &&
-             Math.min(y1, y2) <= rectBottom &&
-             Math.max(y1, y2) >= rectTop;
-    }
-
-    // Check intersection with horizontal edges
-    if (m === 0) {
-      // Horizontal line
-      return y1 >= rectTop && y1 <= rectBottom &&
-             Math.min(x1, x2) <= rectRight &&
-             Math.max(x1, x2) >= rectLeft;
-    }
-
-    // Check intersections with all edges
-    const b = y1 - m * x1; // y-intercept
-
-    // Left edge intersection
-    const leftY = m * rectLeft + b;
-    if (leftY >= rectTop && leftY <= rectBottom && isPointInSegment(rectLeft, leftY)) return true;
-
-    // Right edge intersection
-    const rightY = m * rectRight + b;
-    if (rightY >= rectTop && rightY <= rectBottom && isPointInSegment(rectRight, rightY)) return true;
-
-    // Top edge intersection
-    const topX = (rectTop - b) / m;
-    if (topX >= rectLeft && topX <= rectRight && isPointInSegment(topX, rectTop)) return true;
-
-    // Bottom edge intersection
-    const bottomX = (rectBottom - b) / m;
-    if (bottomX >= rectLeft && bottomX <= rectRight && isPointInSegment(bottomX, rectBottom)) return true;
-
-    return false;
-  }
 
   // Add new function to handle deletion
   function handleDeleteSelected() {
     setLines(lines.filter(line => !line.selected));
     setSelectedLine(null);
-  }
-
-  // Update the point drag handlers
-  function handlePointDragStart() {
-    setIsDraggingHandler(true);
-  }
-
-  function handlePointDragEnd(e: Konva.KonvaEventObject<DragEvent>) {
-    // This handler should ONLY deal with point dragging cleanup
-    e.cancelBubble = true;  // Prevent bubbling to stage
-    e.evt.stopPropagation();
-    e.evt.preventDefault();
-    
-    // Small delay to ensure state update happens after the event
-    requestAnimationFrame(() => {
-      setIsDraggingHandler(false);
-    });
-  }
-
-
-  function arePointsEqual(p1: Point, p2: Point, tolerance: number = 0.1): boolean {
-    return Math.abs(p1.x - p2.x) <= tolerance && Math.abs(p1.y - p2.y) <= tolerance;
   }
 
   function handleClearAll() {
@@ -502,6 +375,10 @@ export function CroquisCanvas() {
           handleResetZoom={handleResetZoom}
           hasSelectedLines={lines.some(line => line.selected)}
           setFilletLines={setFilletLines}
+          setShowMap={setShowMap}
+          showMap={showMap}
+          showGrid={showGrid}
+          setShowGrid={setShowGrid}
         />
         
         {/* Add status banner */}
@@ -514,10 +391,8 @@ export function CroquisCanvas() {
         )}
 
         <div className="relative w-[800px] h-[600px]">
-          {/* Replace map div with MapComponent */}
-          <MapComponent className="absolute inset-0 z-0" />
+          {showMap && <MapComponent className="absolute inset-0 z-0" />}
           
-          {/* Konva Stage Container */}
           <div className="absolute inset-0 z-10">
             <Stage
               width={800}
@@ -553,30 +428,33 @@ export function CroquisCanvas() {
                 }
               }}
               onWheel={handleWheel}
-              className={`${
-                mode === "pan" ? 'cursor-grab active:cursor-grabbing' : 
-                mode === "moveWalls" ? 'cursor-move' : ''
-              }`}
+              className={`
+                ${mode === "pan" ? 'cursor-grab active:cursor-grabbing' : 
+                  mode === "moveWalls" ? 'cursor-move' : ''}
+              `}
+              style={{
+                backgroundImage: showGrid ? `radial-gradient(circle at center, #ddd 1px, transparent 1px)` : 'none',
+                backgroundSize: showGrid ? `${GRID_SIZE * scale}px ${GRID_SIZE * scale}px` : undefined,
+                backgroundPosition: showGrid ? 
+                  `${position.x % (GRID_SIZE * scale)}px ${position.y % (GRID_SIZE * scale)}px` : 
+                  undefined
+              }}
               scaleX={scale}
               scaleY={scale}
               x={position.x}
               y={position.y}
               draggable={mode === "pan" && !isDraggingHandler}
-              onDragEnd={handleStageDragEnd}
+              onDragEnd={(e) => handleStageDragEnd(e, isDraggingHandler)}
             >
+              {/* Main Layer for lines and other elements */}
               <Layer 
                 ref={layerRef}
                 listening={true}
                 clearBeforeDraw={true}
               >
-                {/* Grid */}
-                <Group key="grid">
-                  {/* ... grid elements ... */}
-                </Group>
-
                 {/* Lines */}
                 {lines.map((line) => (
-                  <Group key={line.id}>
+                  <React.Fragment key={line.id}>
                     <Line
                       points={line.points}
                       stroke={line.selected ? "#22c55e" : hoveredLine === line.id ? "#64748b" : "#334155"}
@@ -587,47 +465,9 @@ export function CroquisCanvas() {
                       perfectDrawEnabled={false}
                       lineCap='round'
                       lineJoin='round'
-                      hitStrokeWidth={20}
+                      hitStrokeWidth={10}
                     />
-                    
-                    {/* Add endpoint handles for selected lines */}
-                    {line.selected && (
-                      <>
-                        <Circle
-                          x={line.points[0]}
-                          y={line.points[1]}
-                          radius={6}
-                          fill="#fff"
-                          stroke="#22c55e"
-                          strokeWidth={2}
-                          draggable
-                          onDragStart={handlePointDragStart}
-                          onDragMove={(e) => handlePointDrag(line.id, true, {
-                            x: e.target.x(),
-                            y: e.target.y()
-                          })}
-                          onDragEnd={handlePointDragEnd}
-                          hitStrokeWidth={10}
-                        />
-                        <Circle
-                          x={line.points[2]}
-                          y={line.points[3]}
-                          radius={6}
-                          fill="#fff"
-                          stroke="#22c55e"
-                          strokeWidth={2}
-                          draggable
-                          onDragStart={handlePointDragStart}
-                          onDragMove={(e) => handlePointDrag(line.id, false, {
-                            x: e.target.x(),
-                            y: e.target.y()
-                          })}
-                          onDragEnd={handlePointDragEnd}
-                          hitStrokeWidth={10}
-                        />
-                      </>
-                    )}
-                  </Group>
+                  </React.Fragment>
                 ))}
 
                 {/* Move walls preview */}
@@ -725,50 +565,70 @@ export function CroquisCanvas() {
                 })}
 
                 {/* Add alignment guides */}
-                {mode === "draw" && isDrawing && alignmentPoints.map((point, index) => {
+                {mode === "draw" && alignmentPoints.map((point, index) => {
                   const currentLine = lines[lines.length - 1];
                   const currentPoint = {
                     x: currentLine.points[2],
                     y: currentLine.points[3]
                   };
 
-                  // Only draw guides if points are aligned
-                  const isVerticalAlign = Math.abs(point.x - currentPoint.x) < SNAP_THRESHOLD;
-                  const isHorizontalAlign = Math.abs(point.y - currentPoint.y) < SNAP_THRESHOLD;
+                  // Calculate exact distances
+                  const distanceX = Math.abs(point.x - currentPoint.x);
+                  const distanceY = Math.abs(point.y - currentPoint.y);
+
+                  // Only show alignment if within threshold and it's the closer alignment
+                  const isVerticalAlign = distanceX < SNAP_THRESHOLD && distanceX < distanceY;
+                  const isHorizontalAlign = distanceY < SNAP_THRESHOLD && distanceY < distanceX;
+
+                  const CANVAS_SIZE = 2000;
 
                   return (
                     <Group key={`guide-${index}`}>
+                      {/* Render vertical guide */}
                       {isVerticalAlign && (
-                        <Line
-                          points={[
-                            point.x,
-                            Math.min(point.y, currentPoint.y),
-                            point.x,
-                            Math.max(point.y, currentPoint.y)
-                          ]}
-                          stroke="#2563eb"
-                          strokeWidth={1}
-                          dash={[4, 4]}
-                          opacity={0.5}
-                          listening={false}
-                          perfectDrawEnabled={false}
-                        />
+                        <>
+                          <Line
+                            points={[point.x, -CANVAS_SIZE, point.x, CANVAS_SIZE]}
+                            stroke="#2563eb"
+                            strokeWidth={1}
+                            dash={[4, 4]}
+                            opacity={0.5}
+                            listening={false}
+                            perfectDrawEnabled={false}
+                          />
+                          <Circle
+                            x={point.x}
+                            y={point.y}
+                            radius={4}
+                            fill="#2563eb"
+                            opacity={0.8}
+                            perfectDrawEnabled={false}
+                            listening={false}
+                          />
+                        </>
                       )}
+                      {/* Render horizontal guide */}
                       {isHorizontalAlign && (
-                        <Line
-                          points={[
-                            Math.min(point.x, currentPoint.x),
-                            point.y,
-                            Math.max(point.x, currentPoint.x),
-                            point.y
-                          ]}
-                          stroke="#2563eb"
-                          strokeWidth={1}
-                          dash={[4, 4]}
-                          opacity={0.5}
-                          listening={false}
-                          perfectDrawEnabled={false}
-                        />
+                        <>
+                          <Line
+                            points={[-CANVAS_SIZE, point.y, CANVAS_SIZE, point.y]}
+                            stroke="#2563eb"
+                            strokeWidth={1}
+                            dash={[4, 4]}
+                            opacity={0.5}
+                            listening={false}
+                            perfectDrawEnabled={false}
+                          />
+                          <Circle
+                            x={point.x}
+                            y={point.y}
+                            radius={4}
+                            fill="#2563eb"
+                            opacity={0.8}
+                            perfectDrawEnabled={false}
+                            listening={false}
+                          />
+                        </>
                       )}
                     </Group>
                   );
@@ -824,6 +684,86 @@ export function CroquisCanvas() {
                     />
                   </Group>
                 )}
+              </Layer>
+
+              {/* New Layer specifically for circles/points */}
+              <Layer>
+                {/* Selected point handlers */}
+                {lines.map((line) => (
+                  line.selected && (
+                    <React.Fragment key={`points-${line.id}`}>
+                      <Circle
+                        x={line.points[0]}
+                        y={line.points[1]}
+                        radius={6}
+                        fill="#fff"
+                        stroke="#22c55e"
+                        strokeWidth={2}
+                        draggable
+                        onDragStart={handlePointDragStart}
+                        onDragMove={(e) => handlePointDrag(line.id, true, {
+                          x: e.target.x(),
+                          y: e.target.y()
+                        }, e)}
+                        onDragEnd={handlePointDragEnd}
+                        hitStrokeWidth={10}
+                      />
+                      <Circle
+                        x={line.points[2]}
+                        y={line.points[3]}
+                        radius={6}
+                        fill="#fff"
+                        stroke="#22c55e"
+                        strokeWidth={2}
+                        draggable
+                        onDragStart={handlePointDragStart}
+                        onDragMove={(e) => handlePointDrag(line.id, false, {
+                          x: e.target.x(),
+                          y: e.target.y()
+                        }, e)}
+                        onDragEnd={handlePointDragEnd}
+                        hitStrokeWidth={10}
+                      />
+                    </React.Fragment>
+                  )
+                ))}
+
+                {/* Snap points */}
+                {snapPoint && (
+                  <Circle
+                    x={snapPoint.x}
+                    y={snapPoint.y}
+                    radius={6}
+                    fill="rgba(34, 197, 94, 0.3)"
+                    stroke="#22c55e"
+                    strokeWidth={2}
+                    perfectDrawEnabled={false}
+                  />
+                )}
+
+                {/* Alignment points */}
+                {mode === "draw" && alignmentPoints.map((point, index) => {
+                  const currentPoint = {
+                    x: lines[lines.length - 1]?.points[2],
+                    y: lines[lines.length - 1]?.points[3]
+                  };
+                  const distanceX = Math.abs(point.x - currentPoint.x);
+                  const distanceY = Math.abs(point.y - currentPoint.y);
+                  const isAligned = distanceX < SNAP_THRESHOLD || distanceY < SNAP_THRESHOLD;
+
+                  return isAligned && (
+                    <Circle
+                      key={`align-point-${index}`}
+                      x={point.x}
+                      y={point.y}
+                      radius={4}
+                      fill="#2563eb"
+                      opacity={0.8}
+                      perfectDrawEnabled={false}
+                      listening={false}
+                    />
+                  );
+                })}
               </Layer>
             </Stage>
           </div>

@@ -78,3 +78,8 @@
   height: 100%;
   position: relative;
 }
+
+.bg-grid {
+  background-image: radial-gradient(circle, #ddd 1px, transparent 1px);
+  background-size: 10px 10px;
+}

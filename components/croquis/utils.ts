@@ -1,19 +1,18 @@
-import { Point, LineElement, ConnectionInfo } from './types';
+import { Point, LineElement, ConnectionInfo, SelectionRect } from './types';
 
 // Constants
 export const SNAP_THRESHOLD = 10;
 export const WIND_ROSE_MARGIN = 20;
 export const WIND_ROSE_SIZE = 200;
 
-export function findNearestPoint(point: Point, currentLineId: string, lines: LineElement[] = []): Point | null {
+export function findNearestPoint(point: Point, currentLineId: string, lines: LineElement[] = [], excludeSelected: boolean = true): Point | null {
   if (!Array.isArray(lines)) return null;
   
   let nearestPoint: Point | null = null;
   let minDistance = Infinity;
 
-  console.log('original line is', currentLineId);
   lines.forEach(line => {
-    if (line.selected) {
+    if (excludeSelected && line.selected) {
       return null;
     }
     if (line.id === currentLineId) return;
@@ -133,33 +132,27 @@ export function findConnectedEndpoint(line: LineElement, otherLines: LineElement
   return { startConnection, endConnection };
 }
 
-export function findAlignmentPoints(point: Point, currentLineId: string, lines: LineElement[] = []): Point[] {
-  if (!Array.isArray(lines)) return [];
-  
+export function findAlignmentPoints(point: Point, currentLineId: string, lines: LineElement[]): Point[] {
   const alignmentPoints: Point[] = [];
-  const threshold = 5;
 
   lines.forEach(line => {
     if (line.id === currentLineId) return;
 
-    const points = [
-      { x: line.points[0], y: line.points[1] },
-      { x: line.points[2], y: line.points[3] }
-    ];
+    // Add start point of each line
+    const startPoint = { x: line.points[0], y: line.points[1] };
+    alignmentPoints.push(startPoint);
 
-    points.forEach(p => {
-      // Vertical alignment
-      if (Math.abs(point.x - p.x) < threshold) {
-        alignmentPoints.push({ x: p.x, y: point.y });
-      }
-      // Horizontal alignment
-      if (Math.abs(point.y - p.y) < threshold) {
-        alignmentPoints.push({ x: point.x, y: p.y });
-      }
-    });
+    // Add end point of each line
+    const endPoint = { x: line.points[2], y: line.points[3] };
+    alignmentPoints.push(endPoint);
   });
 
-  return alignmentPoints;
+  // Remove duplicates
+  return alignmentPoints.filter((point, index, self) =>
+    index === self.findIndex(p => 
+      p.x === point.x && p.y === point.y
+    )
+  );
 }
 
 export function getLineLength(points: number[]): number {
@@ -253,3 +246,92 @@ export function trimLinesToIntersection(
     return line;
   });
 } 
+
+  // Add helper function to check if a line is contained in or intersects with rectangle
+  export function isLineInSelection(line: LineElement, rect: SelectionRect): boolean {
+    const [x1, y1, x2, y2] = line.points;
+    const rectLeft = Math.min(rect.startX, rect.startX + rect.width);
+    const rectRight = Math.max(rect.startX, rect.startX + rect.width);
+    const rectTop = Math.min(rect.startY, rect.startY + rect.height);
+    const rectBottom = Math.max(rect.startY, rect.startY + rect.height);
+
+    // For window selection (right to left), check if line is fully contained
+    if (rect.isWindowSelection) {
+      return (
+        x1 >= rectLeft && x1 <= rectRight &&
+        x2 >= rectLeft && x2 <= rectRight &&
+        y1 >= rectTop && y1 <= rectBottom &&
+        y2 >= rectTop && y2 <= rectBottom
+      );
+    }
+
+    // For crossing selection (left to right), use Cohen-Sutherland algorithm
+    // Helper function to get point position code relative to rectangle
+    function getPointCode(x: number, y: number): number {
+      let code = 0;
+      if (x < rectLeft) code |= 1;     // left
+      if (x > rectRight) code |= 2;    // right
+      if (y < rectTop) code |= 4;      // top
+      if (y > rectBottom) code |= 8;   // bottom
+      return code;
+    }
+
+    // Get codes for line endpoints
+    const code1 = getPointCode(x1, y1);
+    const code2 = getPointCode(x2, y2);
+
+    // If both points are outside on the same side, no intersection
+    if (code1 & code2) return false;
+
+    // If both points are inside, line is contained
+    if (code1 === 0 && code2 === 0) return true;
+
+    // Check intersection with rectangle edges
+    const m = (y2 - y1) / (x2 - x1); // Line slope
+    
+    // Helper function to check if point is within line segment
+    function isPointInSegment(px: number, py: number): boolean {
+      const buffer = 0.1; // Small buffer for floating point precision
+      return px >= Math.min(x1, x2) - buffer && 
+             px <= Math.max(x1, x2) + buffer && 
+             py >= Math.min(y1, y2) - buffer && 
+             py <= Math.max(y1, y2) + buffer;
+    }
+
+    // Check intersection with vertical edges
+    if (!isFinite(m)) {
+      // Vertical line
+      return x1 >= rectLeft && x1 <= rectRight &&
+             Math.min(y1, y2) <= rectBottom &&
+             Math.max(y1, y2) >= rectTop;
+    }
+
+    // Check intersection with horizontal edges
+    if (m === 0) {
+      // Horizontal line
+      return y1 >= rectTop && y1 <= rectBottom &&
+             Math.min(x1, x2) <= rectRight &&
+             Math.max(x1, x2) >= rectLeft;
+    }
+
+    // Check intersections with all edges
+    const b = y1 - m * x1; // y-intercept
+
+    // Left edge intersection
+    const leftY = m * rectLeft + b;
+    if (leftY >= rectTop && leftY <= rectBottom && isPointInSegment(rectLeft, leftY)) return true;
+
+    // Right edge intersection
+    const rightY = m * rectRight + b;
+    if (rightY >= rectTop && rightY <= rectBottom && isPointInSegment(rectRight, rightY)) return true;
+
+    // Top edge intersection
+    const topX = (rectTop - b) / m;
+    if (topX >= rectLeft && topX <= rectRight && isPointInSegment(topX, rectTop)) return true;
+
+    // Bottom edge intersection
+    const bottomX = (rectBottom - b) / m;
+    if (bottomX >= rectLeft && bottomX <= rectRight && isPointInSegment(bottomX, rectBottom)) return true;
+
+    return false;
+  }

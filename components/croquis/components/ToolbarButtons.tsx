@@ -9,7 +9,8 @@ import {
   Trash2,
   Plus,
   Minus,
-  ZoomIn
+  ZoomIn,
+  Map
 } from "lucide-react";
 import { DrawingMode } from "../types";
 
@@ -25,6 +26,10 @@ interface ToolbarButtonsProps {
   handleResetZoom: () => void;
   hasSelectedLines: boolean;
   setFilletLines: (lines: string[]) => void;
+  showMap: boolean;
+  setShowMap: (value: boolean) => void;
+  showGrid: boolean;
+  setShowGrid: (show: boolean) => void;
 }
 
 export function ToolbarButtons({
@@ -39,6 +44,10 @@ export function ToolbarButtons({
   handleResetZoom,
   hasSelectedLines,
   setFilletLines,
+  showMap,
+  setShowMap,
+  showGrid,
+  setShowGrid,
 }: ToolbarButtonsProps) {
   return (
     <div className="flex gap-2 items-center">
@@ -152,6 +161,19 @@ export function ToolbarButtons({
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
+                variant={showMap ? "default" : "outline"}
+                onClick={() => setShowMap(!showMap)}
+                size="icon"
+              >
+                <Map className="w-4 h-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Toggle Map</TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
                 variant="outline"
                 onClick={handleZoomIn}
                 size="icon"
@@ -216,6 +238,23 @@ export function ToolbarButtons({
           </TooltipTrigger>
           <TooltipContent>Fillet (Join Lines)</TooltipContent>
         </Tooltip>
+
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant={showGrid ? "default" : "outline"}
+                size="icon"
+                onClick={() => setShowGrid(!showGrid)}
+              >
+                <LayoutGrid className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>Toggle Grid</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </TooltipProvider>
     </div>
   );
